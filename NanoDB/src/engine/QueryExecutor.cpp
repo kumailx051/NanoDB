@@ -75,6 +75,114 @@ static void joinPath(const char* dir, const char* file, char* outPath, int outSi
 	std::snprintf(outPath, static_cast<size_t>(outSize), "%s%s%s", dir, needsSep ? "/" : "", file != 0 ? file : "");
 }
 
+static int compareStrings(const char* left, const char* right) {
+	if (left == 0 && right == 0) {
+		return 0;
+	}
+	if (left == 0) {
+		return -1;
+	}
+	if (right == 0) {
+		return 1;
+	}
+
+	int i = 0;
+	while (left[i] != '\0' && right[i] != '\0') {
+		if (left[i] != right[i]) {
+			return (left[i] < right[i]) ? -1 : 1;
+		}
+		i += 1;
+	}
+
+	if (left[i] == right[i]) {
+		return 0;
+	}
+	return (left[i] == '\0') ? -1 : 1;
+}
+
+static bool getJoinColumnNames(const char* leftName, const char* rightName, const char*& leftColumn, const char*& rightColumn) {
+	leftColumn = 0;
+	rightColumn = 0;
+
+	if (leftName == 0 || rightName == 0) {
+		return false;
+	}
+
+	if (compareStrings(leftName, "customer") == 0 && compareStrings(rightName, "orders") == 0) {
+		leftColumn = "c_custkey";
+		rightColumn = "o_custkey";
+		return true;
+	}
+	if (compareStrings(leftName, "orders") == 0 && compareStrings(rightName, "customer") == 0) {
+		leftColumn = "o_custkey";
+		rightColumn = "c_custkey";
+		return true;
+	}
+	if (compareStrings(leftName, "orders") == 0 && compareStrings(rightName, "lineitem") == 0) {
+		leftColumn = "o_orderkey";
+		rightColumn = "l_orderkey";
+		return true;
+	}
+	if (compareStrings(leftName, "lineitem") == 0 && compareStrings(rightName, "orders") == 0) {
+		leftColumn = "l_orderkey";
+		rightColumn = "o_orderkey";
+		return true;
+	}
+
+	return false;
+}
+
+static void reorderJoinTables(const char* tables[], Table* loadedTables[], int count,
+					  const char* mstOrder[], int mstCount,
+					  const char* orderedNames[], Table* orderedTables[], int orderedOriginalIndex[]) {
+	for (int i = 0; i < count; ++i) {
+		orderedNames[i] = tables[i];
+		orderedTables[i] = loadedTables[i];
+		orderedOriginalIndex[i] = i;
+	}
+
+	if (mstCount != count) {
+		return;
+	}
+
+	for (int i = 0; i < count; ++i) {
+		int sourceIndex = -1;
+		for (int j = 0; j < count; ++j) {
+			if (mstOrder[i] != 0 && compareStrings(mstOrder[i], tables[j]) == 0) {
+				sourceIndex = j;
+				break;
+			}
+		}
+		if (sourceIndex < 0) {
+			return;
+		}
+		orderedNames[i] = tables[sourceIndex];
+		orderedTables[i] = loadedTables[sourceIndex];
+		orderedOriginalIndex[i] = sourceIndex;
+	}
+}
+
+static bool rowMatchesJoinKey(Row* leftRow, Row* rightRow, int leftKeyIndex, int rightKeyIndex) {
+	if (leftRow == 0 || rightRow == 0 || leftKeyIndex < 0 || rightKeyIndex < 0) {
+		return false;
+	}
+
+	Field* leftField = leftRow->getField(leftKeyIndex);
+	Field* rightField = rightRow->getField(rightKeyIndex);
+	if (leftField == 0 || rightField == 0) {
+		return false;
+	}
+
+	return static_cast<int>(leftField->toDouble()) == static_cast<int>(rightField->toDouble());
+}
+
+static void placeRow(Row* rows[], int rowCount, int originalIndex, Row* row) {
+	if (rows == 0 || originalIndex < 0 || originalIndex >= rowCount) {
+		return;
+	}
+	rows[originalIndex] = row;
+}
+
 static void printJoinedRow(Row** rows, int count) {
 	if (rows == 0 || count <= 0) {
 		return;
@@ -899,11 +1007,10 @@ void QueryExecutor::executePersistenceTest() {
 		executeInsert(query);
 	}
 
+	FileManager reloadManager;
 	Table* temp = new Table(meta->tableName, meta->rowCount + 10);
 	buildTableFromCatalog(temp, meta);
-	if (fileManager != 0) {
-		fileManager->loadTable(temp, meta->filePath);
-	}
+	reloadManager.loadTable(temp, meta->filePath);
 
 	int found = 0;
 	int rowCount = temp->getRowCount();
@@ -922,7 +1029,7 @@ void QueryExecutor::executePersistenceTest() {
 		}
 	}
 
-	Logger::logf("[LOG] PERSIST_TEST inserted 5 rows; reload found %d", found);
+	Logger::logf("[LOG] PERSIST_TEST inserted 5 rows; fresh reload found %d", found);
 	delete temp;
 }
 
@@ -1149,6 +1256,10 @@ void QueryExecutor::executeJoin(Token* tokens, int tokenCount, const char* table
 
 	optimizer->executeJoin(0, count, 0, 0);
 
+	const char* mstOrder[10];
+	int mstCount = 0;
+	optimizer->getJoinOrder(mstOrder, mstCount);
+
 	Table* joinTables[5];
 	for (int i = 0; i < count; ++i) {
 		joinTables[i] = ensureTableLoaded(tables[i]);
@@ -1157,6 +1268,11 @@ void QueryExecutor::executeJoin(Token* tokens, int tokenCount, const char* table
 			return;
 		}
 	}
+
+	const char* orderedNames[5];
+	Table* orderedTables[5];
+	int orderedOriginalIndex[5];
+	reorderJoinTables(tables, joinTables, count, mstOrder, mstCount, orderedNames, orderedTables, orderedOriginalIndex);
 
 	int whereIndex = -1;
 	for (int i = 0; i < tokenCount; ++i) {
@@ -1237,27 +1353,22 @@ void QueryExecutor::executeJoin(Token* tokens, int tokenCount, const char* table
 	bool stop = false;
 
 	if (count == 2) {
-		Table* left = joinTables[0];
-		Table* right = joinTables[1];
-		int leftKey = -1;
-		int rightKey = -1;
-
-		if (equalsIgnoreCase(tables[0], "customer") && equalsIgnoreCase(tables[1], "orders")) {
-			leftKey = left->getColumnIndex("c_custkey");
-			rightKey = right->getColumnIndex("o_custkey");
-		} else if (equalsIgnoreCase(tables[0], "orders") && equalsIgnoreCase(tables[1], "customer")) {
-			leftKey = left->getColumnIndex("o_custkey");
-			rightKey = right->getColumnIndex("c_custkey");
-		} else if (equalsIgnoreCase(tables[0], "orders") && equalsIgnoreCase(tables[1], "lineitem")) {
-			leftKey = left->getColumnIndex("o_orderkey");
-			rightKey = right->getColumnIndex("l_orderkey");
-		} else if (equalsIgnoreCase(tables[0], "lineitem") && equalsIgnoreCase(tables[1], "orders")) {
-			leftKey = left->getColumnIndex("l_orderkey");
-			rightKey = right->getColumnIndex("o_orderkey");
+		const char* leftName = orderedNames[0];
+		const char* rightName = orderedNames[1];
+		const char* leftColumn = 0;
+		const char* rightColumn = 0;
+		if (!getJoinColumnNames(leftName, rightName, leftColumn, rightColumn)) {
+			Logger::logf("[ERROR] Unsupported join pair: %s, %s", leftName, rightName);
+			delete[] exprTokens;
+			return;
 		}
 
+		Table* left = orderedTables[0];
+		Table* right = orderedTables[1];
+		int leftKey = left->getColumnIndex(leftColumn);
+		int rightKey = right->getColumnIndex(rightColumn);
 		if (leftKey < 0 || rightKey < 0) {
-			Logger::logf("[ERROR] Unsupported join pair: %s, %s", tables[0], tables[1]);
+			Logger::logf("[ERROR] Join columns missing for pair: %s, %s", leftName, rightName);
 			delete[] exprTokens;
 			return;
 		}
@@ -1271,7 +1382,7 @@ void QueryExecutor::executeJoin(Token* tokens, int tokenCount, const char* table
 			if (bufferPool != 0) {
 				int pageId = i / 128;
 				if (pageId != lastLeftPage) {
-					bufferPool->fetchPage(pageId, tables[0]);
+					bufferPool->fetchPage(pageId, leftName);
 					lastLeftPage = pageId;
 				}
 			}
@@ -1280,7 +1391,7 @@ void QueryExecutor::executeJoin(Token* tokens, int tokenCount, const char* table
 			if (leftRow == 0) {
 				continue;
 			}
-			if (filterTable == 0 && postfix != 0) {
+			if (filterTable == orderedOriginalIndex[0] && postfix != 0) {
 				if (!evaluator.evaluate(postfix, postfixCount, leftRow, left)) {
 					continue;
 				}
@@ -1296,7 +1407,7 @@ void QueryExecutor::executeJoin(Token* tokens, int tokenCount, const char* table
 				if (bufferPool != 0) {
 					int pageId = j / 128;
 					if (pageId != lastRightPage) {
-						bufferPool->fetchPage(pageId, tables[1]);
+						bufferPool->fetchPage(pageId, rightName);
 						lastRightPage = pageId;
 					}
 				}
@@ -1305,7 +1416,7 @@ void QueryExecutor::executeJoin(Token* tokens, int tokenCount, const char* table
 				if (rightRow == 0) {
 					continue;
 				}
-				if (filterTable == 1 && postfix != 0) {
+				if (filterTable == orderedOriginalIndex[1] && postfix != 0) {
 					if (!evaluator.evaluate(postfix, postfixCount, rightRow, right)) {
 						continue;
 					}
@@ -1315,14 +1426,16 @@ void QueryExecutor::executeJoin(Token* tokens, int tokenCount, const char* table
 				if (rightField == 0) {
 					continue;
 				}
-				int rightVal = static_cast<int>(rightField->toDouble());
-				if (leftVal == rightVal) {
-					Row* rows[2];
-					rows[0] = leftRow;
-					rows[1] = rightRow;
+				if (leftVal == static_cast<int>(rightField->toDouble())) {
+					Row* rows[5];
+					for (int r = 0; r < 5; ++r) {
+						rows[r] = 0;
+					}
+					placeRow(rows, 5, orderedOriginalIndex[0], leftRow);
+					placeRow(rows, 5, orderedOriginalIndex[1], rightRow);
 					totalMatches += 1;
 					if (printed < maxOutput) {
-						printJoinedRow(rows, 2);
+						printJoinedRow(rows, count);
 						printed += 1;
 					}
 					if (printed >= maxOutput) {
@@ -1333,146 +1446,138 @@ void QueryExecutor::executeJoin(Token* tokens, int tokenCount, const char* table
 			}
 		}
 	} else if (count == 3) {
-		int idxCustomer = -1;
-		int idxOrders = -1;
-		int idxLineitem = -1;
-		for (int i = 0; i < count; ++i) {
-			if (equalsIgnoreCase(tables[i], "customer")) {
-				idxCustomer = i;
-			} else if (equalsIgnoreCase(tables[i], "orders")) {
-				idxOrders = i;
-			} else if (equalsIgnoreCase(tables[i], "lineitem")) {
-				idxLineitem = i;
-			}
-		}
+		const char* firstName = orderedNames[0];
+		const char* secondName = orderedNames[1];
+		const char* thirdName = orderedNames[2];
+		const char* firstLeftColumn = 0;
+		const char* firstRightColumn = 0;
+		const char* secondLeftColumn = 0;
+		const char* secondRightColumn = 0;
 
-		if (idxCustomer < 0 || idxOrders < 0 || idxLineitem < 0) {
-			Logger::logf("[ERROR] Join requires customer, orders, lineitem");
+		if (!getJoinColumnNames(firstName, secondName, firstLeftColumn, firstRightColumn) ||
+			!getJoinColumnNames(secondName, thirdName, secondLeftColumn, secondRightColumn)) {
+			Logger::logf("[ERROR] Join order from MST contains unsupported edge sequence: %s -> %s -> %s",
+				firstName, secondName, thirdName);
 			delete[] exprTokens;
 			return;
 		}
 
-		Table* customerTable = joinTables[idxCustomer];
-		Table* ordersTable = joinTables[idxOrders];
-		Table* lineitemTable = joinTables[idxLineitem];
-		int customerKey = customerTable->getColumnIndex("c_custkey");
-		int ordersCustKey = ordersTable->getColumnIndex("o_custkey");
-		int ordersKey = ordersTable->getColumnIndex("o_orderkey");
-		int lineitemOrderKey = lineitemTable->getColumnIndex("l_orderkey");
+		Table* firstTable = orderedTables[0];
+		Table* secondTable = orderedTables[1];
+		Table* thirdTable = orderedTables[2];
+		int firstLeftKey = firstTable->getColumnIndex(firstLeftColumn);
+		int firstRightKey = secondTable->getColumnIndex(firstRightColumn);
+		int secondLeftKey = secondTable->getColumnIndex(secondLeftColumn);
+		int secondRightKey = thirdTable->getColumnIndex(secondRightColumn);
 
-		if (customerKey < 0 || ordersCustKey < 0 || ordersKey < 0 || lineitemOrderKey < 0) {
-			Logger::logf("[ERROR] Join columns missing for three-table join");
+		if (firstLeftKey < 0 || firstRightKey < 0 || secondLeftKey < 0 || secondRightKey < 0) {
+			Logger::logf("[ERROR] Join columns missing for MST order: %s -> %s -> %s",
+				firstName, secondName, thirdName);
 			delete[] exprTokens;
 			return;
 		}
 
-		int custRows = customerTable->getRowCount();
-		int orderRows = ordersTable->getRowCount();
-		int lineRows = lineitemTable->getRowCount();
-		int lastCustPage = -1;
-		int lastOrderPage = -1;
-		int lastLinePage = -1;
+		int firstRows = firstTable->getRowCount();
+		int secondRows = secondTable->getRowCount();
+		int thirdRows = thirdTable->getRowCount();
+		int lastFirstPage = -1;
+		int lastSecondPage = -1;
+		int lastThirdPage = -1;
 
-		for (int i = 0; i < custRows && !stop; ++i) {
+		for (int i = 0; i < firstRows && !stop; ++i) {
 			if (bufferPool != 0) {
 				int pageId = i / 128;
-				if (pageId != lastCustPage) {
-					bufferPool->fetchPage(pageId, tables[idxCustomer]);
-					lastCustPage = pageId;
+				if (pageId != lastFirstPage) {
+					bufferPool->fetchPage(pageId, firstName);
+					lastFirstPage = pageId;
 				}
 			}
 
-			Row* custRow = customerTable->getRow(i);
-			if (custRow == 0) {
+			Row* firstRow = firstTable->getRow(i);
+			if (firstRow == 0) {
 				continue;
 			}
-			if (filterTable == idxCustomer && postfix != 0) {
-				if (!evaluator.evaluate(postfix, postfixCount, custRow, customerTable)) {
+			if (filterTable == orderedOriginalIndex[0] && postfix != 0) {
+				if (!evaluator.evaluate(postfix, postfixCount, firstRow, firstTable)) {
 					continue;
 				}
 			}
 
-			Field* custField = custRow->getField(customerKey);
-			if (custField == 0) {
+			Field* firstField = firstRow->getField(firstLeftKey);
+			if (firstField == 0) {
 				continue;
 			}
-			int custVal = static_cast<int>(custField->toDouble());
+			int firstValue = static_cast<int>(firstField->toDouble());
 
-			for (int j = 0; j < orderRows && !stop; ++j) {
+			for (int j = 0; j < secondRows && !stop; ++j) {
 				if (bufferPool != 0) {
 					int pageId = j / 128;
-					if (pageId != lastOrderPage) {
-						bufferPool->fetchPage(pageId, tables[idxOrders]);
-						lastOrderPage = pageId;
+					if (pageId != lastSecondPage) {
+						bufferPool->fetchPage(pageId, secondName);
+						lastSecondPage = pageId;
 					}
 				}
 
-				Row* orderRow = ordersTable->getRow(j);
-				if (orderRow == 0) {
+				Row* secondRow = secondTable->getRow(j);
+				if (secondRow == 0) {
 					continue;
 				}
-				if (filterTable == idxOrders && postfix != 0) {
-					if (!evaluator.evaluate(postfix, postfixCount, orderRow, ordersTable)) {
+				if (filterTable == orderedOriginalIndex[1] && postfix != 0) {
+					if (!evaluator.evaluate(postfix, postfixCount, secondRow, secondTable)) {
 						continue;
 					}
 				}
 
-				Field* orderCustField = orderRow->getField(ordersCustKey);
-				if (orderCustField == 0) {
-					continue;
-				}
-				int orderCustVal = static_cast<int>(orderCustField->toDouble());
-				if (orderCustVal != custVal) {
+				Field* secondLeftField = secondRow->getField(firstRightKey);
+				if (secondLeftField == 0 || static_cast<int>(secondLeftField->toDouble()) != firstValue) {
 					continue;
 				}
 
-				Field* orderKeyField = orderRow->getField(ordersKey);
-				if (orderKeyField == 0) {
+				Field* secondRightField = secondRow->getField(secondLeftKey);
+				if (secondRightField == 0) {
 					continue;
 				}
-				int orderKeyVal = static_cast<int>(orderKeyField->toDouble());
+				int secondValue = static_cast<int>(secondRightField->toDouble());
 
-				for (int k = 0; k < lineRows; ++k) {
+				for (int k = 0; k < thirdRows; ++k) {
 					if (bufferPool != 0) {
 						int pageId = k / 128;
-						if (pageId != lastLinePage) {
-							bufferPool->fetchPage(pageId, tables[idxLineitem]);
-							lastLinePage = pageId;
+						if (pageId != lastThirdPage) {
+							bufferPool->fetchPage(pageId, thirdName);
+							lastThirdPage = pageId;
 						}
 					}
 
-					Row* lineRow = lineitemTable->getRow(k);
-					if (lineRow == 0) {
+					Row* thirdRow = thirdTable->getRow(k);
+					if (thirdRow == 0) {
 						continue;
 					}
-					if (filterTable == idxLineitem && postfix != 0) {
-						if (!evaluator.evaluate(postfix, postfixCount, lineRow, lineitemTable)) {
+					if (filterTable == orderedOriginalIndex[2] && postfix != 0) {
+						if (!evaluator.evaluate(postfix, postfixCount, thirdRow, thirdTable)) {
 							continue;
 						}
 					}
 
-					Field* lineOrderField = lineRow->getField(lineitemOrderKey);
-					if (lineOrderField == 0) {
+					Field* thirdField = thirdRow->getField(secondRightKey);
+					if (thirdField == 0 || static_cast<int>(thirdField->toDouble()) != secondValue) {
 						continue;
 					}
-					int lineOrderVal = static_cast<int>(lineOrderField->toDouble());
-					if (lineOrderVal == orderKeyVal) {
-						Row* rows[3];
-						rows[0] = 0;
-						rows[1] = 0;
-						rows[2] = 0;
-						rows[idxCustomer] = custRow;
-						rows[idxOrders] = orderRow;
-						rows[idxLineitem] = lineRow;
-						totalMatches += 1;
-						if (printed < maxOutput) {
-							printJoinedRow(rows, count);
-							printed += 1;
-						}
-						if (printed >= maxOutput) {
-							stop = true;
-							break;
-						}
+
+					Row* rows[5];
+					for (int r = 0; r < 5; ++r) {
+						rows[r] = 0;
+					}
+					placeRow(rows, 5, orderedOriginalIndex[0], firstRow);
+					placeRow(rows, 5, orderedOriginalIndex[1], secondRow);
+					placeRow(rows, 5, orderedOriginalIndex[2], thirdRow);
+					totalMatches += 1;
+					if (printed < maxOutput) {
+						printJoinedRow(rows, count);
+						printed += 1;
+					}
+					if (printed >= maxOutput) {
+						stop = true;
+						break;
 					}
 				}
 			}
