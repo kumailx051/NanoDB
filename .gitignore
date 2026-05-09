@@ -9,3 +9,4 @@ build/
 *.bin
 **/logs/
 .vscode/
+run command.txt

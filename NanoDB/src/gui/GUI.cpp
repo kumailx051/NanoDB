@@ -15,6 +15,7 @@
 #include "imgui_impl_opengl3.h"
 #include <GLFW/glfw3.h>
 #include <cstdio>
+#include <cstdlib>
 #include <chrono>
 
 static int stringLength(const char* text) {
@@ -547,6 +548,16 @@ void GUI::renderToolbar() {
 		if (executor != 0) {
 			executor->runWorkloadFile("tests/queries.txt");
 			refreshLogLines();
+		}
+	}
+	ImGui::SameLine();
+	if (ImGui::Button("Run Test Runner")) {
+		if (executor != 0) {
+			// Launch external test_runner in a new console window on Windows
+			std::system("start \"\" build\\test_runner.exe");
+			refreshLogLines();
+		} else {
+			copyString(setupStatus, static_cast<int>(sizeof(setupStatus)), "Query engine not ready.");
 		}
 	}
 	ImGui::SameLine();

@@ -225,6 +225,7 @@ QueryExecutor::QueryExecutor(BufferPool* bp, SystemCatalog* cat) {
 	customerLoaded = false;
 	ordersLoaded = false;
 	lineitemLoaded = false;
+	maxResultPrintRows = 100;
 }
 
 QueryExecutor::~QueryExecutor() {
@@ -754,7 +755,34 @@ void QueryExecutor::executeSelect(const char* query) {
 	}
 
 	if (whereIndex < 0) {
-		table->print();
+		// Print table header and up to maxResultPrintRows rows to avoid flooding the terminal
+		int maxPrint = (maxResultPrintRows > 0) ? maxResultPrintRows : 0x7fffffff;
+		std::printf("Table: %s\n", tableNames[0]);
+		int colCount = table->getColumnCount();
+		for (int c = 0; c < colCount; ++c) {
+			std::printf("%s", table->getColumnName(c) != 0 ? table->getColumnName(c) : "");
+			if (c < colCount - 1) {
+				std::printf(" | ");
+			}
+		}
+		if (colCount > 0) {
+			std::printf("\n");
+		}
+		int printed = 0;
+		int rowCountAll = table->getRowCount();
+		for (int i = 0; i < rowCountAll; ++i) {
+			if (printed >= maxPrint) {
+				break;
+			}
+			Row* r = table->getRow(i);
+			if (r != 0) {
+				r->print();
+				printed += 1;
+			}
+		}
+		if (table->getRowCount() > printed) {
+			Logger::logf("[LOG] Results truncated: showing %d of %d rows for table %s", printed, table->getRowCount(), tableNames[0]);
+		}
 		return;
 	}
 
@@ -785,6 +813,7 @@ void QueryExecutor::executeSelect(const char* query) {
 	ExpressionEvaluator evaluator;
 	int rowCount = table->getRowCount();
 	int lastPage = -1;
+	int printed = 0;
 	for (int i = 0; i < rowCount; ++i) {
 		if (bufferPool != 0) {
 			int pageId = i / 128;
@@ -798,7 +827,13 @@ void QueryExecutor::executeSelect(const char* query) {
 			continue;
 		}
 		if (evaluator.evaluate(postfix, postfixCount, row, table)) {
-			row->print();
+			if (maxResultPrintRows <= 0 || printed < maxResultPrintRows) {
+				row->print();
+				printed += 1;
+			} else if (printed == maxResultPrintRows) {
+				Logger::logf("[LOG] Results truncated: showing %d rows (further matches suppressed)", printed);
+				printed += 1; // increment to avoid logging repeatedly
+			}
 		}
 	}
 
@@ -1347,7 +1382,7 @@ void QueryExecutor::executeJoin(Token* tokens, int tokenCount, const char* table
 	}
 
 	ExpressionEvaluator evaluator;
-	const int maxOutput = 50;
+	const int maxOutput = (maxResultPrintRows > 0) ? maxResultPrintRows : 0x7fffffff;
 	int printed = 0;
 	int totalMatches = 0;
 	bool stop = false;
@@ -1599,6 +1634,14 @@ void QueryExecutor::initLog(const char* logPath) {
 	}
 	logFile = std::fopen(logPath, "w");
 	Logger::setFile(logFile);
+}
+
+void QueryExecutor::setMaxResultPrintRows(int maxRows) {
+	if (maxRows < 0) {
+		maxResultPrintRows = 0;
+	} else {
+		maxResultPrintRows = maxRows;
+	}
 }
 
 void QueryExecutor::writeLog(const char* message) {

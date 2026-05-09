@@ -30,6 +30,7 @@ class QueryExecutor {
 	bool customerLoaded;
 	bool ordersLoaded;
 	bool lineitemLoaded;
+    int maxResultPrintRows;
 
 	void executeSelect(const char* query);
 	void executeSelectSeq(const char* query);
@@ -60,6 +61,9 @@ class QueryExecutor {
 public:
 	QueryExecutor(BufferPool* bp, SystemCatalog* cat);
 	~QueryExecutor();
+
+	// Limit for how many result rows to print for a single query (0 = no limit)
+	void setMaxResultPrintRows(int maxRows);
 
 	void submitQuery(const char* query, int priority);
 	void processQueue();
