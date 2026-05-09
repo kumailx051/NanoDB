@@ -1,0 +1,56 @@
+SELECT * FROM customer WHERE c_custkey == 1
+SELECT * FROM customer WHERE c_acctbal > 5000
+SELECT * FROM customer WHERE c_nationkey == 15
+SELECT * FROM orders WHERE o_orderstatus == "O"
+SELECT * FROM orders WHERE o_totalprice > 100000
+SELECT * FROM lineitem WHERE l_quantity > 40
+SELECT * FROM customer WHERE c_mktsegment == "BUILDING"
+SELECT * FROM orders WHERE o_shippriority == 0
+SELECT * FROM lineitem WHERE l_discount > 0.08
+SELECT * FROM customer WHERE c_acctbal < 0
+
+SELECT * FROM customer WHERE (c_acctbal > 5000 AND c_mktsegment == "BUILDING")
+SELECT * FROM customer WHERE (c_acctbal > 5000 AND c_mktsegment == "BUILDING") OR c_nationkey == 15
+SELECT * FROM orders WHERE (o_totalprice > 50000 AND o_orderstatus == "F") OR o_shippriority == 1
+SELECT * FROM lineitem WHERE (l_quantity > 30 AND l_discount > 0.05) OR l_tax > 0.07
+SELECT * FROM orders WHERE (o_custkey > 1000 AND o_totalprice < 200000) OR o_orderstatus == "P"
+SELECT * FROM customer WHERE (c_acctbal < 0 AND c_nationkey == 10) OR c_mktsegment == "AUTOMOBILE"
+SELECT * FROM orders WHERE (o_totalprice >= 150000 AND o_orderstatus == "O") OR o_shippriority == 0
+SELECT * FROM lineitem WHERE (l_discount < 0.02 AND l_tax > 0.05) OR l_returnflag == "R"
+SELECT * FROM orders WHERE (o_custkey == 42 AND o_shippriority == 0) OR o_orderstatus == "P"
+SELECT * FROM customer WHERE (c_nationkey == 1 AND c_acctbal >= 1000) OR c_phone == "555-0001"
+
+SELECT * FROM orders WHERE (o_totalprice * 1.5) > 100000
+SELECT * FROM orders WHERE (o_custkey % 2 == 0)
+SELECT * FROM orders WHERE (o_totalprice * 1.5) > 100000 AND (o_custkey % 2 == 0)
+SELECT * FROM lineitem WHERE (l_extendedprice * (1 - l_discount)) > 50000
+SELECT * FROM orders WHERE (o_totalprice * 1.5) > 100000 AND (o_custkey % 2 == 0) OR o_orderstatus != "O"
+
+INSERT INTO customer VALUES (99991, "Test User 1", "123 Main St", 1, "555-0001", 1500.00, "AUTO", "test")
+INSERT INTO customer VALUES (99992, "Test User 2", "456 Oak Ave", 2, "555-0002", 2500.00, "BUILDING", "test")
+INSERT INTO orders VALUES (99991, 99991, "O", 75000.00, "1995-01-01", "1-URGENT", "Clerk#001", 0, "test")
+INSERT INTO lineitem VALUES (99991, 1, 1, 1, 25.00, 50000.00, 0.05, 0.08, "N", "O", "1995-02-01", "1995-02-15", "1995-02-20", "DELIVER IN PERSON", "AIR", "test")
+INSERT INTO customer VALUES (99993, "Test User 3", "789 Pine Rd", 3, "555-0003", 3500.00, "AUTO", "test")
+
+UPDATE customer SET c_acctbal = 9999.99 WHERE c_custkey == 99991
+UPDATE orders SET o_orderstatus = "F" WHERE o_orderkey == 99991
+UPDATE customer SET c_mktsegment = "AUTOMOBILE" WHERE c_custkey == 99992
+UPDATE lineitem SET l_quantity = 50.00 WHERE l_orderkey == 99991
+UPDATE customer SET c_acctbal = 0.00 WHERE c_nationkey == 99
+
+SELECT * FROM customer JOIN orders ON c_custkey == o_custkey WHERE c_custkey == 1
+SELECT * FROM customer JOIN orders ON c_custkey == o_custkey WHERE o_totalprice > 100000
+SELECT * FROM customer JOIN orders JOIN lineitem ON c_custkey == o_custkey AND o_orderkey == l_orderkey WHERE c_custkey == 1
+SELECT * FROM orders JOIN lineitem ON o_orderkey == l_orderkey WHERE l_discount > 0.08
+SELECT * FROM customer JOIN orders JOIN lineitem ON c_custkey == o_custkey AND o_orderkey == l_orderkey
+
+SELECT * FROM customer WHERE (c_acctbal > 5000 AND c_mktsegment == "BUILDING") OR c_nationkey == 15
+SELECT_SEQ * FROM customer WHERE c_custkey == 500
+SELECT_IDX * FROM customer WHERE c_custkey == 500
+SELECT * FROM customer JOIN orders JOIN lineitem ON c_custkey == o_custkey AND o_orderkey == l_orderkey
+STRESS_TEST lineitem 5000
+FLOOD_TEST 50
+ADMIN UPDATE customer SET c_acctbal = 1234.56 WHERE c_custkey == 1
+SELECT * FROM orders WHERE ((o_totalprice * 1.5) > 100000 AND (o_custkey % 2 == 0)) OR (o_orderstatus != "O")
+PERSIST_TEST
+ADMIN UPDATE customer SET c_acctbal = 4321.00 WHERE c_custkey == 2

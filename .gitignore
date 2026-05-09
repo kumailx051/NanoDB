@@ -1,0 +1,11 @@
+build/
+**/build/
+*.exe
+**/*.exe
+*.o
+**/*.o
+*.tbl
+**/data/*.bin
+*.bin
+**/logs/
+.vscode/
